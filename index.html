@@ -305,6 +305,7 @@ input:disabled{opacity:.7;cursor:not-allowed}
 }
 .wallet .w-stats{display:flex;flex-wrap:wrap;gap:4px 18px;padding:2px 16px 10px;font-size:13px}.wallet .w-btns{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:0 16px}
 .cur-amt{display:flex;gap:6px}.cur-amt select{width:auto;flex:0 0 auto}.cur-amt input{flex:1;min-width:0}
+.atm-list{max-height:40vh;overflow:auto;margin:8px 0}.atm-row{display:flex;gap:8px;align-items:flex-start;padding:5px 0;border-bottom:1px solid var(--line,#eee)}
 </style>
 </head>
 <body>
@@ -719,13 +720,14 @@ function walletStats(ym) {
   w.balance = w.start + w.inAll - w.outAll; return w;
 }
 function walletInner(ym) {
-  const w = walletStats(ym), neg = w.balance < 0, f = c => fmtCur(c, 'CRC');
+  const w = walletStats(ym), neg = w.balance < 0, f = c => fmtCur(c, 'CRC'), atmN = S.txns.filter(looksATM).length;
   return `<div class="card-h"><h3>💵 Cash wallet</h3><span class="muted">In your wallet <b class="${neg ? 'neg' : ''}" id="walBal">${f(w.balance)}</b></span></div>
   <div class="w-stats"><span>Withdrawn in ${monthLabel(ym)} <b>${f(w.inM)}</b></span><span>Paid in cash <b>${f(w.outM)}</b></span><span>All time: in <b>${f(w.start + w.inAll)}</b> · out <b>${f(w.outAll)}</b></span></div>
+  ${atmN ? `<div class="notice" style="margin:0 16px 10px"><b>${atmN} bank transaction${atmN === 1 ? '' : 's'} look like ATM withdrawals</b> but ${atmN === 1 ? 'isn’t' : 'aren’t'} in your wallet yet. <button class="link" data-act="atm-finder">Move them to the wallet</button></div>` : ''}
   ${neg ? '<div class="notice" style="margin:0 16px 10px">You’ve recorded more cash payments than cash withdrawn. Add the ATM withdrawal you’re missing, or set your starting cash.</div>' : ''}
   ${w.needRate ? '<div class="hint" style="margin:0 16px 8px">Some withdrawals are in dollars with no colón amount. Set the exchange rate (or edit them to the colones you actually received) so the wallet is accurate.</div>' : ''}
-  <div class="w-btns"><button class="btn sm primary" data-act="add-cash">+ Cash payment</button><button class="btn sm" data-act="add-withdrawal">+ Cash withdrawal</button><button class="btn sm ghost" data-act="wallet-start">Starting cash</button><button class="link" data-act="wallet-list">View cash activity</button></div>
-  <p class="hint" style="margin:8px 16px 12px">An ATM withdrawal isn’t spending — it just moves money into your wallet. Spending is counted when you <b>pay</b> (e.g. utilities in colones) and put that payment in a category.</p>`;
+  <div class="w-btns"><button class="btn sm primary" data-act="add-cash">+ Cash payment</button><button class="btn sm" data-act="add-withdrawal">+ Cash withdrawal</button><button class="btn sm" data-act="reconcile">Allocate leftover cash</button><button class="btn sm ghost" data-act="wallet-start">Starting cash</button><button class="link" data-act="wallet-list">View cash activity</button></div>
+  <p class="hint" style="margin:8px 16px 12px">An ATM withdrawal isn’t spending — it just moves money into your wallet. Spending is counted when you <b>pay</b> (e.g. utilities in colones) and put that payment in a category. Paid cash instead of card? Press ＋ on any budget row and tick “Paid in cash”. Cash you spent without a receipt: use “Allocate leftover cash”.</p>`;
 }
 function incomeCard(m) {
   const rows = m.income.map(i => `<div class="inc-row"><input class="txt" data-inc-name="${i.id}" value="${esc(i.name)}" placeholder="Income source (e.g. Paycheck)" maxlength="60"><label class="mw" data-cur="${esc(curSym())}"><input data-inc-amt="${i.id}" inputmode="decimal" value="${inputVal(i.amount)}" placeholder="0.00" aria-label="Income amount"></label>${i.txnId ? '<span class="tag">from bank</span>' : '<span></span>'}<button class="icon-btn" data-act="del-income" data-id="${i.id}" title="Remove" aria-label="Remove income">✕</button></div>`).join('');
@@ -743,7 +745,7 @@ function catRow(c, ym) {
     <div class="cat-name"><span class="dot ${st.status}"></span><button class="name-btn" data-act="cat-details" data-id="${c.id}" title="View transactions">${esc(c.name)}</button>${c.cash ? '<span class="tag" title="Usually paid in cash">💵</span>' : ''}${pi >= 0 ? `<span class="tag goal">Goal #${pi + 1}</span>` : c.fund ? '<span class="tag fund">Fund</span>' : ''}</div>
     <label class="mw" data-cur="${esc(curSym())}"><input class="planned" data-cat="${c.id}" inputmode="decimal" autocomplete="off" value="${m.planned[c.id] ? inputVal(m.planned[c.id]) : ''}" placeholder="0.00" aria-label="Planned for ${esc(c.name)}"></label>
     <div class="cat-progress">${progressHtml(st)}</div>
-    <div class="row-tools"><button class="icon-btn" data-act="edit-cat" data-id="${c.id}" title="Edit" aria-label="Edit">✎</button>${c.projectId ? '' : `<button class="icon-btn" data-act="del-cat" data-id="${c.id}" title="Delete" aria-label="Delete">✕</button>`}</div>
+    <div class="row-tools"><button class="icon-btn" data-act="add-pay" data-id="${c.id}" title="Add a payment (card or cash)" aria-label="Add payment">＋</button><button class="icon-btn" data-act="edit-cat" data-id="${c.id}" title="Edit" aria-label="Edit">✎</button>${c.projectId ? '' : `<button class="icon-btn" data-act="del-cat" data-id="${c.id}" title="Delete" aria-label="Delete">✕</button>`}</div>
   </div>`;
 }
 function groupTotalsHtml(g, ym) {
@@ -792,7 +794,7 @@ function cardActions(t) {
   if (t.xfer) return `<span class="tag ok" style="margin:0">💵 Cash withdrawal · ${fmtCur(crcOf(t), 'CRC')}</span><button class="link" data-act="edit-txn" data-id="${t.id}">Edit</button>`;
   if (st === 'pending') return `<select class="mini" data-assign="${t.id}">${catOptionsHtml('', 'Assign to…')}</select><button class="btn sm" data-act="edit-txn" data-id="${t.id}" title="Split across several categories">Split</button><button class="link" data-act="ignore-txn" data-id="${t.id}">Ignore</button><button class="link" data-act="mark-cash" data-id="${t.id}" title="This was an ATM cash withdrawal">ATM cash</button>`;
   const multi = t.splits.length > 1;
-  return `<span class="chips">${t.splits.map(s => `<span class="chip">${esc(catById(s.catId)?.name || '?')}${multi ? ' · ' + fmt(s.amount) : ''}</span>`).join('')}</span>${t.cash ? '<span class="tag" title="Paid in cash">💵 cash</span>' : ''}${t.auto ? '<span class="tag" title="Assigned by a rule">auto</span>' : ''}<button class="link" data-act="edit-txn" data-id="${t.id}">Edit</button><button class="link" data-act="unassign" data-id="${t.id}" title="Move back to Unassigned">Undo</button>`;
+  return `<span class="chips">${t.splits.map(s => `<span class="chip">${esc(catById(s.catId)?.name || '?')}${multi ? ' · ' + fmt(s.amount) : ''}</span>`).join('')}</span>${t.cash ? '<button class="link" data-act="toggle-cash" data-id="' + t.id + '" title="Paid in cash — click to change to card">💵 cash ✓</button>' : '<button class="link" data-act="toggle-cash" data-id="' + t.id + '" title="Paid in cash instead of card? Click to mark">Mark cash</button>'}${looksATM(t) ? '<button class="link" data-act="mark-cash" data-id="' + t.id + '" title="This was an ATM cash withdrawal">ATM cash</button>' : ''}${t.auto ? '<span class="tag" title="Assigned by a rule">auto</span>' : ''}<button class="link" data-act="edit-txn" data-id="${t.id}">Edit</button><button class="link" data-act="unassign" data-id="${t.id}" title="Move back to Unassigned">Undo</button>`;
 }
 function txnCard(t) {
   const inc = t.kind === 'income';
@@ -848,7 +850,7 @@ function txRow(t) {
   else if (st === 'ignored') cat = `<span class="tag" style="margin:0">Ignored</span> <button class="link" data-act="restore-txn" data-id="${t.id}">Restore</button>`;
   else if (inc) cat = t.counted ? '<span class="tag ok" style="margin:0">Counted as income</span>' : `<button class="btn sm" data-act="count-income" data-id="${t.id}">Add to income</button> <button class="link" data-act="ignore-txn" data-id="${t.id}">Ignore</button>`;
   else if ((t.splits || []).length > 1) cat = `<button class="chip" data-act="edit-txn" data-id="${t.id}" title="${esc(catNames(t))}">Split · ${t.splits.length} categories</button>`;
-  else cat = `<select class="mini" data-assign="${t.id}">${catOptionsHtml(t.splits?.[0]?.catId, 'Unassigned')}</select>${t.auto ? ' <span class="tag" title="Assigned by a rule">auto</span>' : ''}${t.cash ? ' <span class="tag" title="Paid in cash">💵 cash</span>' : ''}${st === 'pending' ? ' <button class="link" data-act="ignore-txn" data-id="' + t.id + '">Ignore</button> <button class="link" data-act="mark-cash" data-id="' + t.id + '" title="This was an ATM cash withdrawal">ATM cash</button>' : ''}`;
+  else cat = `<select class="mini" data-assign="${t.id}">${catOptionsHtml(t.splits?.[0]?.catId, 'Unassigned')}</select>${t.auto ? ' <span class="tag" title="Assigned by a rule">auto</span>' : ''}${t.cash ? ' <button class="link" data-act="toggle-cash" data-id="' + t.id + '" title="Paid in cash — click to change to card">💵 cash ✓</button>' : (st !== 'pending' && !inc ? ' <button class="link" data-act="toggle-cash" data-id="' + t.id + '" title="Paid in cash instead of card? Click to mark">Mark cash</button>' : '')}${st !== 'pending' && looksATM(t) ? ' <button class="link" data-act="mark-cash" data-id="' + t.id + '" title="This was an ATM cash withdrawal">ATM cash</button>' : ''}${st === 'pending' ? ' <button class="link" data-act="ignore-txn" data-id="' + t.id + '">Ignore</button> <button class="link" data-act="mark-cash" data-id="' + t.id + '" title="This was an ATM cash withdrawal">ATM cash</button>' : ''}`;
   return `<div class="tx-row ${UI.sel.has(t.id) ? 'sel' : ''}" data-row="${t.id}"><input type="checkbox" class="row-chk" data-id="${t.id}" ${UI.sel.has(t.id) ? 'checked' : ''} aria-label="Select"><span class="date">${fmtDate(t.date)}</span><span class="desc" title="${esc(t.desc)}">${esc(t.desc) || '(no description)'}</span><span class="cat-cell">${cat}</span><span class="amt ${inc ? 'pos' : 'neg'}">${inc ? '+' : '-'}${fmt(t.amount)}${t.orig ? `<span class="orig">${fmtCur(t.orig.amount, t.orig.cur)}</span>` : ''}</span><span class="acts">${inc ? '' : `<button class="icon-btn" data-act="edit-txn" data-id="${t.id}" title="Split across categories" aria-label="Split">✂</button>`}<button class="icon-btn" data-act="edit-txn" data-id="${t.id}" title="Edit" aria-label="Edit">✎</button><button class="icon-btn" data-act="del-txn" data-id="${t.id}" title="Delete" aria-label="Delete">🗑</button></span></div>`;
 }
 let lastFilteredIds = [];
@@ -868,7 +870,7 @@ function renderTxList() {
 function renderBulkBar() {
   const el = $('#bulkBar'); if (!el) return; const n = UI.sel.size, prev = $('#bulkCat')?.value || '';
   if (!n) { el.innerHTML = ''; return; }
-  el.innerHTML = `<div class="bulk"><b>${n} selected</b><select id="bulkCat">${catOptionsHtml(prev, 'Assign to…')}</select><button class="btn sm primary" data-act="bulk-assign">Assign</button><button class="btn sm" data-act="bulk-ignore">Ignore</button><button class="btn sm danger" data-act="bulk-del">Delete</button><button class="btn sm ghost" data-act="bulk-clear">Clear</button></div>`;
+  el.innerHTML = `<div class="bulk"><b>${n} selected</b><select id="bulkCat">${catOptionsHtml(prev, 'Assign to…')}</select><button class="btn sm primary" data-act="bulk-assign">Assign</button><button class="btn sm" data-act="bulk-atm" title="They were ATM cash withdrawals">ATM cash</button><button class="btn sm" data-act="bulk-ignore">Ignore</button><button class="btn sm danger" data-act="bulk-del">Delete</button><button class="btn sm ghost" data-act="bulk-clear">Clear</button></div>`;
 }
 
 /* ───────────────────────── Goals tab ───────────────────────── */
@@ -937,13 +939,13 @@ function openTxn(id, preset) {
   const tot0 = t ? (cur0 === base ? t.amount : t.orig.amount) : 0;
   let sp = (t?.splits || []).map(s => ({ cat: s.catId, amt: toInput(cur0 === base || !t.amount ? s.amount : Math.round(s.amount * tot0 / t.amount)) }));
   if (cur0 !== base && t && sp.length) { const o = sp.slice(0, -1).reduce((a, r) => a + parseTyped(r.amt), 0); sp[sp.length - 1].amt = toInput(tot0 - o); }
-  if (!sp.length) sp = [{ cat: '', amt: toInput(tot0) }];
-  const m = modal({ title: t ? 'Edit / split transaction' : (preset.cash ? 'Add cash payment' : 'Add transaction'), wide: true, body: `
+  if (!sp.length) sp = [{ cat: preset.cat || '', amt: toInput(tot0) }];
+  const m = modal({ title: t ? 'Edit / split transaction' : (preset.cat ? 'Add payment · ' + (catById(preset.cat)?.name || '') : preset.cash ? 'Add cash payment' : 'Add transaction'), wide: true, body: `
     <div class="grid2"><label class="fld"><span>Date</span><input type="date" id="tDate" value="${d.date}"></label>
     <label class="fld"><span>Type</span><select id="tKind" style="width:100%">${opts([['expense', 'Expense (money out)'], ['income', 'Income / deposit (money in)']], d.kind)}</select></label>
     <label class="fld span2"><span>Description / merchant</span><input class="txt" id="tDesc" value="${esc(d.desc)}" maxlength="200" placeholder="e.g. Electric bill (ICE)"></label>
     <label class="fld"><span>Total amount — in</span><span class="cur-amt"><select id="tCur">${opts([['CRC', '₡ Colones'], ['USD', '$ Dollars']], cur0)}</select><input class="txt money" id="tAmt" inputmode="decimal" value="${toInput(tot0)}" placeholder="0"></span><span class="hint" id="tConv"></span></label></div>
-    <div id="cashRow"><label class="chk"><input type="checkbox" id="tCash" ${(d.cash || preset.cash) ? 'checked' : ''}> 💵 Paid in cash from my wallet (comes out of your cash balance)</label></div>
+    <div id="cashRow"><label class="chk"><input type="checkbox" id="tCash" ${(d.cash || preset.cash || (preset.cat && catById(preset.cat)?.cash)) ? 'checked' : ''}> 💵 Paid in cash (comes out of my wallet) — leave unticked if you paid by card / bank</label></div>
     <div id="incBox"><label class="chk"><input type="checkbox" id="tCount" ${d.counted ? 'checked' : ''}> Count this deposit toward income for its month</label></div>
     <div id="splitBox"><div class="split-h"><h4>Category assignment</h4><span id="spInfo" class="split-info"></span></div><div id="spRows"></div>
     <div class="row-gap"><button class="btn sm" id="spAdd">+ Add split</button><button class="btn sm ghost" id="spFill">Fill remainder</button><button class="btn sm ghost" id="spClear">Clear assignment</button></div>
@@ -1004,6 +1006,52 @@ function openTxn(id, preset) {
     delete rec.xfer; delete rec.cashIn; delete rec.man;
     if (count) { const ym = ymOf(date), pt = totalIncome(ym); getMonth(ym).income.push({ id: uid(), name: desc || 'Deposit', amount: amountB, txnId: rec.id }); afterIncomeChange(pt, ym); }
     m.close(); commit(true); toast(t ? 'Transaction saved' : (rec.cash ? 'Cash payment added' : 'Transaction added'), 'ok');
+  };
+}
+
+/* ───────────────────────── cash helpers: find old ATM entries, allocate leftover cash ───────────────────────── */
+const looksATM = t => t.kind === 'expense' && !t.xfer && !t.ignored && !t.cash && !t.man &&
+  (/\b(atm|cajero|retiro|withdraw\w*|cash\s*adv\w*)\b/i.test(t.desc || '') || (t.splits || []).some(s => /cash|pocket|efectivo/i.test(catById(s.catId)?.name || '')));
+function toWallet(t) { t.xfer = 'cash'; delete t.cashIn; delete t.cash; t.splits = []; t.ignored = false; t.auto = false; }
+function openAtmFinder() {
+  const list = S.txns.filter(looksATM).sort((a, b) => b.date.localeCompare(a.date));
+  if (!list.length) return toast('No bank transactions look like ATM withdrawals.');
+  const m = modal({ title: 'Move ATM withdrawals to your cash wallet', wide: true, body: `
+    <p style="margin-top:0">These bank transactions look like cash withdrawals. Moving one puts the colones into your wallet and takes it out of its budget row (a withdrawal isn’t spending — the cash you <i>pay</i> with is). Untick anything that isn’t an ATM withdrawal.</p>
+    <div class="atm-list">${list.map(t => `<label class="chk atm-row"><input type="checkbox" class="atm-chk" data-id="${t.id}" checked><span>${fmtDate(t.date)} · ${esc(t.desc) || '(no description)'} · <b>${fmtBase(t.amount)}</b>${catNames(t) ? ` · now in ${esc(catNames(t))}` : ''} → wallet ≈ <b>${fmtCur(crcOf(t), 'CRC')}</b></span></label>`).join('')}</div>
+    <p class="hint">Colones are estimated from the exchange rate. For an exact figure, edit the entry afterwards and type the colones the ATM actually gave you.</p>`,
+    footer: '<button class="btn" data-close>Cancel</button><button class="btn primary" id="atmGo">Move selected to wallet</button>' });
+  $('#atmGo', m.el).onclick = () => { let n = 0; $$('.atm-chk', m.el).forEach(cb => { if (!cb.checked) return; const t = txn(cb.dataset.id); if (t) { toWallet(t); n++; } }); m.close(); commit(true); toast(`${n} withdrawal${n === 1 ? '' : 's'} moved to your cash wallet`, 'ok'); };
+}
+function openReconcile() {
+  const ym = UI.month, w = walletStats(ym), base = S.settings.base;
+  const cats = S.groups.flatMap(g => g.cats).filter(c => !c.projectId);
+  const def = cats.find(c => /cash|pocket|efectivo/i.test(c.name)) || cats.find(c => /misc/i.test(c.name));
+  const m = modal({ title: 'Allocate leftover cash', body: `
+    <p style="margin-top:0">Your records say your wallet should hold <b>${fmtCur(w.balance, 'CRC')}</b>. Count what is really in it. Whatever is missing was spent without a receipt — it gets recorded as a cash payment in the category you choose, so your planned / spent / left numbers still add up.</p>
+    <label class="fld"><span>Cash actually in my wallet now (₡)</span><input class="txt money" id="rcHave" inputmode="decimal" value="${toInput(Math.max(0, w.balance))}"></label>
+    <div id="rcInfo" class="split-info" style="margin:6px 0 10px"></div>
+    <label class="fld"><span>Put the unaccounted cash in…</span><select id="rcCat" style="width:100%">${catOptionsHtml(def?.id || '', 'Choose category…')}</select></label>
+    <p class="hint">Tip: “Cash / Pocket Money” or “Miscellaneous” both work well. You can also do this per month — it is dated to the month you’re viewing.</p>
+    <div class="err" id="rcErr"></div>`,
+    footer: '<button class="btn" data-close>Cancel</button><button class="btn primary" id="rcGo">Record it</button>' });
+  const q = s => $(s, m.el), diff = () => w.balance - parseTyped(q('#rcHave').value);
+  const info = () => { const d = diff(), el = q('#rcInfo'); el.className = 'split-info ' + (d === 0 ? 'ok' : d > 0 ? 'warn' : 'over'); el.textContent = d === 0 ? '✓ Nothing to allocate' : d > 0 ? fmtCur(d, 'CRC') + ' unaccounted → recorded as cash spending' : fmtCur(-d, 'CRC') + ' more than recorded → added to your wallet'; };
+  q('#rcHave').addEventListener('input', info); info();
+  q('#rcGo').onclick = () => {
+    const err = s => { q('#rcErr').textContent = s; }, d = diff(); if (d === 0) { m.close(); return; }
+    const [y, mo] = ym.split('-').map(Number), date = ym === curYM() ? today() : ym + '-' + String(new Date(y, mo, 0).getDate()).padStart(2, '0');
+    const amount = toBaseC(Math.abs(d), 'CRC'); if (amount === null) return err('Your budget is in ' + base + ' — set the exchange rate first (tap the rate at the top).'); if (!amount) return err('That amount is too small.');
+    const orig = base !== 'CRC' ? { orig: { cur: 'CRC', amount: Math.abs(d) } } : {};
+    if (d > 0) {
+      const catId = q('#rcCat').value; if (!catId) return err('Choose which category the cash was spent from.');
+      S.txns.push({ id: uid(), date, desc: 'Cash spent (no receipt)', amount, kind: 'expense', splits: [{ catId, amount }], ignored: false, counted: false, cash: true, ...orig });
+      toast(fmtCur(d, 'CRC') + ' recorded in ' + catById(catId).name, 'ok');
+    } else {
+      S.txns.push({ id: uid(), date, desc: 'Cash adjustment', amount, kind: 'expense', splits: [], ignored: false, counted: false, xfer: 'cash', cashIn: { amount: -d }, man: true, ...orig });
+      toast('Wallet adjusted by +' + fmtCur(-d, 'CRC'), 'ok');
+    }
+    m.close(); commit(true);
   };
 }
 
@@ -2026,6 +2074,11 @@ const ACT = {
   'add-txn': () => openTxn(),
   'edit-txn': el => { const t = txn(el.dataset.id); if (t && t.xfer) openWithdrawal(t.id); else openTxn(el.dataset.id); },
   'add-cash': () => openTxn(null, { cash: true, cur: 'CRC' }),
+  'add-pay': el => { const c = catById(el.dataset.id); if (c) openTxn(null, { cat: c.id, ...(c.cash ? { cash: true, cur: 'CRC' } : {}) }); },
+  'toggle-cash': el => { const t = txn(el.dataset.id); if (!t || t.kind !== 'expense' || t.xfer) return; if (t.cash) delete t.cash; else t.cash = true; commit(false); toast(t.cash ? 'Marked as paid in cash — it now comes out of your wallet' : 'Marked as paid by card / bank', 'ok'); },
+  'atm-finder': openAtmFinder,
+  reconcile: openReconcile,
+  'bulk-atm': () => { let n = 0; for (const id of UI.sel) { const t = txn(id); if (t && t.kind === 'expense' && !t.xfer) { toWallet(t); n++; } } UI.sel.clear(); commit(true); toast(`${n} moved to your cash wallet`, 'ok'); },
   'add-withdrawal': () => openWithdrawal(),
   'mark-cash': el => openWithdrawal(el.dataset.id),
   'wallet-list': () => { UI.tx.status = 'cash'; UI.tx.scope = 'all'; UI.tab = 'tx'; render(); },
