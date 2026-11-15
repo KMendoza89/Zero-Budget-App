@@ -303,6 +303,8 @@ input:disabled{opacity:.7;cursor:not-allowed}
   .rule-row2{flex-wrap:wrap}
   .g-actions{flex-direction:row}
 }
+.wallet .w-stats{display:flex;flex-wrap:wrap;gap:4px 18px;padding:2px 16px 10px;font-size:13px}.wallet .w-btns{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:0 16px}
+.cur-amt{display:flex;gap:6px}.cur-amt select{width:auto;flex:0 0 auto}.cur-amt input{flex:1;min-width:0}
 </style>
 </head>
 <body>
@@ -377,6 +379,28 @@ function parseAmount(raw) {
 }
 const parseMoney = s => Math.abs(parseAmount(s) ?? 0);
 
+/* ── per-entry currency: type amounts in colones or dollars in ANY view, stored in the base currency ── */
+function toBaseC(c, cur) { if (cur === S.settings.base) return c; if (!(S.settings.rate > 0)) return null; const r = S.settings.rate; return Math.round(S.settings.base === 'CRC' ? c * r : c / r); }
+function fromBaseC(c, cur) { if (cur === S.settings.base) return c; if (!(S.settings.rate > 0)) return 0; const r = S.settings.rate; return Math.round(S.settings.base === 'CRC' ? c / r : c * r); }
+/* typed money → positive cents. A lone "20.000" is read as twenty thousand (Costa Rican style), not 20.000 */
+function parseTyped(s) {
+  s = String(s == null ? '' : s).replace(/[^\d.,()\-]/g, '');
+  if (/^\(?-?\d{1,3}(\.\d{3})+\)?$/.test(s)) s = s.replace(/\./g, '');
+  return Math.abs(parseAmount(s) ?? 0);
+}
+/* {cur, amt (cents in cur), base (cents in budget currency, null if a rate is needed)}. A $ or ₡ typed in the box wins over the default. */
+function readMoney(str, defCur) {
+  str = String(str == null ? '' : str);
+  const cur = /\$|usd|d[oó]lar/i.test(str) ? 'USD' : /₡|crc|col[oó]n/i.test(str) ? 'CRC' : defCur;
+  const amt = parseTyped(str);
+  return { cur, amt, base: amt === 0 ? 0 : toBaseC(amt, cur) };
+}
+function baseIn(str, fallback) { const r = readMoney(str, viewCur()); if (r.base === null) { toast('Set the exchange rate first (tap the rate at the top) to type amounts in ' + r.cur + '.', 'warn'); return fallback; } return r.base; }
+function inputVal(baseC) { const v = conv(baseC); return viewCur() === 'CRC' ? toInput(Math.round(v / 100) * 100) : toInput(v); }
+const cashFields = (t, kind) => kind !== 'expense' ? {} : t.xfer === 'cash'
+  ? { xfer: 'cash', ...(t.cashIn && Math.round(Number(t.cashIn.amount) || 0) > 0 ? { cashIn: { amount: Math.round(Number(t.cashIn.amount) || 0) } } : {}), ...(t.man ? { man: true } : {}) }
+  : (t.cash ? { cash: true } : {});
+
 /* ───────────────────────── state ───────────────────────── */
 let storageOK = true, rev = 0, S;
 
@@ -427,6 +451,7 @@ function normalize(o) {
   s.settings.rateName = String(so.rateName || '').slice(0, 40);
   s.settings.autoRate = so.autoRate !== false;
   s.settings.autoFlow = !!so.autoFlow;
+  s.settings.cashStart = Math.max(0, int(so.cashStart));
   s.settings.csvMaps = so.csvMaps && typeof so.csvMaps === 'object' ? so.csvMaps : {};
   const srcGroups = Array.isArray(o.groups) ? o.groups : def.groups;
   const used = new Set();
@@ -437,7 +462,7 @@ function normalize(o) {
       id: g.id === 'g_projects' ? 'g_projects' : nid(g.id), name: String(g.name || 'Group').slice(0, 60),
       locked: g.id === 'g_projects', collapsed: !!g.collapsed,
       cats: (Array.isArray(g.cats) ? g.cats : []).filter(c => c && typeof c === 'object').map(c => ({
-        id: nid(c.id), name: String(c.name || 'Category').slice(0, 60), fund: !!c.fund, ...(c.projectId ? { projectId: String(c.projectId) } : {})
+        id: nid(c.id), name: String(c.name || 'Category').slice(0, 60), fund: !!c.fund, ...(c.cash && !c.projectId ? { cash: true } : {}), ...(c.projectId ? { projectId: String(c.projectId) } : {})
       }))
     });
   }
@@ -448,7 +473,7 @@ function normalize(o) {
   syncProjectCats(s);
   // map old project cat ids so planned amounts survive: cats were kept by projectId inside syncProjectCats
   const catIds = new Set(); s.groups.forEach(g => g.cats.forEach(c => catIds.add(c.id)));
-  s.rules = (Array.isArray(o.rules) ? o.rules : []).filter(r => r && typeof r === 'object' && String(r.text || '').trim() && (r.target === '__ignore' || r.target === '__income' || catIds.has(r.target)))
+  s.rules = (Array.isArray(o.rules) ? o.rules : []).filter(r => r && typeof r === 'object' && String(r.text || '').trim() && (r.target === '__ignore' || r.target === '__income' || r.target === '__cash' || catIds.has(r.target)))
     .map(r => ({ id: String(r.id || uid()), text: String(r.text).slice(0, 80), mode: ['contains', 'starts', 'regex'].includes(r.mode) ? r.mode : 'contains', target: r.target }));
   for (const [k, m] of Object.entries(o.months && typeof o.months === 'object' ? o.months : {})) {
     if (!/^\d{4}-\d{2}$/.test(k) || !m) continue;
@@ -465,7 +490,7 @@ function normalize(o) {
     const kind = t.kind === 'income' ? 'income' : 'expense';
     let splits = kind === 'expense' ? (Array.isArray(t.splits) ? t.splits : []).filter(x => x && catIds.has(x.catId)).map(x => ({ catId: x.catId, amount: int(x.amount) })) : [];
     if (splits.reduce((a, x) => a + x.amount, 0) !== amount) splits = [];
-    s.txns.push({ id: String(t.id || uid()), date: t.date, desc: String(t.desc || '').slice(0, 200), amount, kind, splits, ignored: !!t.ignored, counted: kind === 'income' && !!t.counted, ...(t.auto ? { auto: true } : {}), ...(t.orig && (t.orig.cur === 'USD' || t.orig.cur === 'CRC') && int(t.orig.amount) ? { orig: { cur: t.orig.cur, amount: int(t.orig.amount) } } : {}) });
+    s.txns.push({ id: String(t.id || uid()), date: t.date, desc: String(t.desc || '').slice(0, 200), amount, kind, splits, ignored: !!t.ignored, counted: kind === 'income' && !!t.counted, ...(t.auto ? { auto: true } : {}), ...cashFields(t, kind), ...(t.orig && (t.orig.cur === 'USD' || t.orig.cur === 'CRC') && int(t.orig.amount) ? { orig: { cur: t.orig.cur, amount: int(t.orig.amount) } } : {}) });
   }
   return s;
 }
@@ -545,7 +570,7 @@ function catStats(cat, ym) {
 const totalIncome = ym => getMonth(ym).income.reduce((a, i) => a + i.amount, 0);
 const totalPlanned = ym => { const m = getMonth(ym); let t = 0; for (const g of S.groups) for (const c of g.cats) t += m.planned[c.id] || 0; return t; };
 const totalSpent = ym => { let t = 0; for (const g of S.groups) for (const c of g.cats) t += spentIn(c.id, ym); return t; };
-const txnStatus = t => t.ignored ? 'ignored' : t.kind === 'income' ? (t.counted ? 'counted' : 'pending') : ((t.splits || []).length ? 'assigned' : 'pending');
+const txnStatus = t => t.ignored ? 'ignored' : t.xfer ? 'assigned' : t.kind === 'income' ? (t.counted ? 'counted' : 'pending') : ((t.splits || []).length ? 'assigned' : 'pending');
 const pendingCount = () => S.txns.filter(t => txnStatus(t) === 'pending').length;
 const catNames = t => (t.splits || []).map(s => catById(s.catId)?.name || '').filter(Boolean).join(', ');
 
@@ -638,7 +663,13 @@ const opts = (list, val) => list.map(([v, l]) => `<option value="${v}"${v === va
 
 /* ───────────────────────── rendering: shell ───────────────────────── */
 function commit(structural) { rev++; save(); structural ? render() : refresh(); }
+let rendering = false, again = false;
 function render() {
+  if (rendering) { again = true; return; }
+  rendering = true; try { renderNow(); } finally { rendering = false; }
+  if (again) { again = false; render(); }
+}
+function renderNow() {
   renderTabs(); renderSummary(); renderMonthNav(); renderCurBar();
   const main = $('#main'); main.dataset.view = UI.tab;
   ({ budget: renderBudget, inbox: renderBudget, tx: renderTx, goals: renderGoals })[UI.tab](main);
@@ -669,8 +700,35 @@ function renderSummary() {
 }
 
 /* ───────────────────────── Budget tab ───────────────────────── */
+/* ───────────────────────── cash wallet (always in colones) ───────────────────────── */
+function crcOf(t) {
+  if (t.xfer === 'cash' && t.cashIn) return t.cashIn.amount;
+  if (t.orig && t.orig.cur === 'CRC') return t.orig.amount;
+  if (S.settings.base === 'CRC') return t.amount;
+  return S.settings.rate > 0 ? Math.round(t.amount * S.settings.rate) : 0;
+}
+function walletStats(ym) {
+  const w = { start: S.settings.cashStart || 0, inM: 0, outM: 0, inAll: 0, outAll: 0, needRate: false };
+  for (const t of S.txns) {
+    if (t.ignored || t.kind !== 'expense') continue;
+    const isX = t.xfer === 'cash'; if (!isX && !t.cash) continue;
+    const v = crcOf(t), mo = ymOf(t.date) === ym;
+    if (!v && S.settings.base !== 'CRC' && !(t.orig && t.orig.cur === 'CRC') && !(t.cashIn)) w.needRate = true;
+    if (isX) { w.inAll += v; if (mo) w.inM += v; } else { w.outAll += v; if (mo) w.outM += v; }
+  }
+  w.balance = w.start + w.inAll - w.outAll; return w;
+}
+function walletInner(ym) {
+  const w = walletStats(ym), neg = w.balance < 0, f = c => fmtCur(c, 'CRC');
+  return `<div class="card-h"><h3>💵 Cash wallet</h3><span class="muted">In your wallet <b class="${neg ? 'neg' : ''}" id="walBal">${f(w.balance)}</b></span></div>
+  <div class="w-stats"><span>Withdrawn in ${monthLabel(ym)} <b>${f(w.inM)}</b></span><span>Paid in cash <b>${f(w.outM)}</b></span><span>All time: in <b>${f(w.start + w.inAll)}</b> · out <b>${f(w.outAll)}</b></span></div>
+  ${neg ? '<div class="notice" style="margin:0 16px 10px">You’ve recorded more cash payments than cash withdrawn. Add the ATM withdrawal you’re missing, or set your starting cash.</div>' : ''}
+  ${w.needRate ? '<div class="hint" style="margin:0 16px 8px">Some withdrawals are in dollars with no colón amount. Set the exchange rate (or edit them to the colones you actually received) so the wallet is accurate.</div>' : ''}
+  <div class="w-btns"><button class="btn sm primary" data-act="add-cash">+ Cash payment</button><button class="btn sm" data-act="add-withdrawal">+ Cash withdrawal</button><button class="btn sm ghost" data-act="wallet-start">Starting cash</button><button class="link" data-act="wallet-list">View cash activity</button></div>
+  <p class="hint" style="margin:8px 16px 12px">An ATM withdrawal isn’t spending — it just moves money into your wallet. Spending is counted when you <b>pay</b> (e.g. utilities in colones) and put that payment in a category.</p>`;
+}
 function incomeCard(m) {
-  const rows = m.income.map(i => `<div class="inc-row"><input class="txt" data-inc-name="${i.id}" value="${esc(i.name)}" placeholder="Income source (e.g. Paycheck)" maxlength="60"><label class="mw" data-cur="${esc(curSym())}"><input data-inc-amt="${i.id}" inputmode="decimal" value="${toInput(conv(i.amount))}" ${converted() ? 'disabled' : ''} placeholder="0.00" aria-label="Income amount"></label>${i.txnId ? '<span class="tag">from bank</span>' : '<span></span>'}<button class="icon-btn" data-act="del-income" data-id="${i.id}" title="Remove" aria-label="Remove income">✕</button></div>`).join('');
+  const rows = m.income.map(i => `<div class="inc-row"><input class="txt" data-inc-name="${i.id}" value="${esc(i.name)}" placeholder="Income source (e.g. Paycheck)" maxlength="60"><label class="mw" data-cur="${esc(curSym())}"><input data-inc-amt="${i.id}" inputmode="decimal" value="${inputVal(i.amount)}" placeholder="0.00" aria-label="Income amount"></label>${i.txnId ? '<span class="tag">from bank</span>' : '<span></span>'}<button class="icon-btn" data-act="del-income" data-id="${i.id}" title="Remove" aria-label="Remove income">✕</button></div>`).join('');
   return `<div class="card income-card" id="incomeCard"><div class="card-h"><h3>Income</h3><span class="muted">Total <b id="incTotal">${fmt(m.income.reduce((a, i) => a + i.amount, 0))}</b></span></div>${rows || '<div class="empty">No income yet — add what you expect to earn this month. You can also drop a deposit transaction here.</div>'}<button class="link" data-act="add-income">+ Add income</button></div>`;
 }
 function progressHtml(st) {
@@ -682,8 +740,8 @@ function catRow(c, ym) {
   const st = catStats(c, ym), m = getMonth(ym);
   const pi = c.projectId ? S.projects.findIndex(p => p.id === c.projectId) : -1;
   return `<div class="cat-row" data-cat="${c.id}">
-    <div class="cat-name"><span class="dot ${st.status}"></span><button class="name-btn" data-act="cat-details" data-id="${c.id}" title="View transactions">${esc(c.name)}</button>${pi >= 0 ? `<span class="tag goal">Goal #${pi + 1}</span>` : c.fund ? '<span class="tag fund">Fund</span>' : ''}</div>
-    <label class="mw" data-cur="${esc(curSym())}"><input class="planned" data-cat="${c.id}" inputmode="decimal" autocomplete="off" value="${m.planned[c.id] ? toInput(conv(m.planned[c.id])) : ''}" ${converted() ? 'disabled' : ''} placeholder="0.00" aria-label="Planned for ${esc(c.name)}"></label>
+    <div class="cat-name"><span class="dot ${st.status}"></span><button class="name-btn" data-act="cat-details" data-id="${c.id}" title="View transactions">${esc(c.name)}</button>${c.cash ? '<span class="tag" title="Usually paid in cash">💵</span>' : ''}${pi >= 0 ? `<span class="tag goal">Goal #${pi + 1}</span>` : c.fund ? '<span class="tag fund">Fund</span>' : ''}</div>
+    <label class="mw" data-cur="${esc(curSym())}"><input class="planned" data-cat="${c.id}" inputmode="decimal" autocomplete="off" value="${m.planned[c.id] ? inputVal(m.planned[c.id]) : ''}" placeholder="0.00" aria-label="Planned for ${esc(c.name)}"></label>
     <div class="cat-progress">${progressHtml(st)}</div>
     <div class="row-tools"><button class="icon-btn" data-act="edit-cat" data-id="${c.id}" title="Edit" aria-label="Edit">✎</button>${c.projectId ? '' : `<button class="icon-btn" data-act="del-cat" data-id="${c.id}" title="Delete" aria-label="Delete">✕</button>`}</div>
   </div>`;
@@ -705,7 +763,7 @@ function renderBudget(el) {
   const ym = UI.month, m = getMonth(ym);
   el.innerHTML = `<div class="layout"><section id="budgetCol">
     <div class="legend"><span><i class="ok"></i>Under budget</span><span><i class="warn"></i>Approaching limit (85%+)</span><span><i class="over"></i>Over budget</span><span>· Drag transactions from the right onto a category to assign them</span></div>
-    ${incomeCard(m)}${S.groups.map(g => groupCard(g, ym)).join('')}
+    ${incomeCard(m)}<div class="card wallet" id="walletCard">${walletInner(ym)}</div>${S.groups.map(g => groupCard(g, ym)).join('')}
     <div class="add-group"><button class="btn" data-act="add-group">+ Add Group</button></div></section>
     <aside class="side"><div class="card side-card"><div class="card-h"><h3>Transactions</h3><div class="row-gap"><button class="btn sm" data-act="rules">Rules</button><button class="btn sm" data-act="import-csv">Import</button></div></div>
       <div class="seg" id="sideSeg"></div>
@@ -718,6 +776,7 @@ function refreshNumbers() {
   $$('.cat-row').forEach(row => { const c = catById(row.dataset.cat); if (!c) return; const st = catStats(c, ym); $('.cat-progress', row).innerHTML = progressHtml(st); $('.dot', row).className = 'dot ' + st.status; });
   for (const g of S.groups) { const el = $('#gt-' + g.id); if (el) el.innerHTML = groupTotalsHtml(g, ym); }
   const it = $('#incTotal'); if (it) it.textContent = fmt(totalIncome(ym));
+  const wc = $('#walletCard'); if (wc) wc.innerHTML = walletInner(ym);
 }
 
 /* side panel */
@@ -730,9 +789,10 @@ function cardActions(t) {
   if (t.kind === 'income') return st === 'pending'
     ? `<button class="btn sm primary" data-act="count-income" data-id="${t.id}">Add as income</button><button class="link" data-act="ignore-txn" data-id="${t.id}">Ignore</button>`
     : `<span class="tag ok" style="margin:0">Income ✓</span><button class="link" data-act="edit-txn" data-id="${t.id}">Edit</button>`;
-  if (st === 'pending') return `<select class="mini" data-assign="${t.id}">${catOptionsHtml('', 'Assign to…')}</select><button class="btn sm" data-act="edit-txn" data-id="${t.id}" title="Split across several categories">Split</button><button class="link" data-act="ignore-txn" data-id="${t.id}">Ignore</button>`;
+  if (t.xfer) return `<span class="tag ok" style="margin:0">💵 Cash withdrawal · ${fmtCur(crcOf(t), 'CRC')}</span><button class="link" data-act="edit-txn" data-id="${t.id}">Edit</button>`;
+  if (st === 'pending') return `<select class="mini" data-assign="${t.id}">${catOptionsHtml('', 'Assign to…')}</select><button class="btn sm" data-act="edit-txn" data-id="${t.id}" title="Split across several categories">Split</button><button class="link" data-act="ignore-txn" data-id="${t.id}">Ignore</button><button class="link" data-act="mark-cash" data-id="${t.id}" title="This was an ATM cash withdrawal">ATM cash</button>`;
   const multi = t.splits.length > 1;
-  return `<span class="chips">${t.splits.map(s => `<span class="chip">${esc(catById(s.catId)?.name || '?')}${multi ? ' · ' + fmt(s.amount) : ''}</span>`).join('')}</span>${t.auto ? '<span class="tag" title="Assigned by a rule">auto</span>' : ''}<button class="link" data-act="edit-txn" data-id="${t.id}">Edit</button><button class="link" data-act="unassign" data-id="${t.id}" title="Move back to Unassigned">Undo</button>`;
+  return `<span class="chips">${t.splits.map(s => `<span class="chip">${esc(catById(s.catId)?.name || '?')}${multi ? ' · ' + fmt(s.amount) : ''}</span>`).join('')}</span>${t.cash ? '<span class="tag" title="Paid in cash">💵 cash</span>' : ''}${t.auto ? '<span class="tag" title="Assigned by a rule">auto</span>' : ''}<button class="link" data-act="edit-txn" data-id="${t.id}">Edit</button><button class="link" data-act="unassign" data-id="${t.id}" title="Move back to Unassigned">Undo</button>`;
 }
 function txnCard(t) {
   const inc = t.kind === 'income';
@@ -755,12 +815,12 @@ function renderTx(el) {
   const f = UI.tx;
   el.innerHTML = `<div class="card"><div class="tx-toolbar">
     <input id="txQ" class="txt search" placeholder="Search merchant, category, amount, date…" value="${esc(f.q)}">
-    <select id="txStatus">${opts([['all', 'All statuses'], ['pending', 'Unassigned'], ['assigned', 'Assigned / counted'], ['ignored', 'Ignored']], f.status)}</select>
+    <select id="txStatus">${opts([['all', 'All statuses'], ['pending', 'Unassigned'], ['assigned', 'Assigned / counted'], ['ignored', 'Ignored'], ['cash', '💵 Cash (wallet)']], f.status)}</select>
     <select id="txCat"><option value="">All categories</option><option value="__none"${f.cat === '__none' ? ' selected' : ''}>— Unassigned —</option>${catOptionsHtml(f.cat, 'All categories').replace(/^<option value="">[^<]*<\/option>/, '')}</select>
     <select id="txScope">${opts([['all', 'All months'], ['month', monthLabel(UI.month)]], f.scope)}</select>
     <select id="txSort">${opts([['date', 'Sort: Date'], ['merchant', 'Sort: Merchant'], ['category', 'Sort: Category'], ['amount', 'Sort: Amount']], f.sort)}</select>
     <button class="btn" id="txDir" title="Toggle sort direction"></button>
-    <span class="grow"></span><button class="btn" data-act="rules">Rules</button><button class="btn" data-act="add-txn">+ Transaction</button><button class="btn primary" data-act="import-csv">Import statement</button></div>
+    <span class="grow"></span><button class="btn" data-act="rules">Rules</button><button class="btn" data-act="add-cash">💵 Cash payment</button><button class="btn" data-act="add-txn">+ Transaction</button><button class="btn primary" data-act="import-csv">Import statement</button></div>
     <div id="bulkBar"></div><div id="txList"></div></div>`;
   updateDirBtn(); renderTxList();
 }
@@ -773,6 +833,7 @@ function filteredTxns() {
     if (f.status === 'pending' && st !== 'pending') return false;
     if (f.status === 'assigned' && st !== 'assigned' && st !== 'counted') return false;
     if (f.status === 'ignored' && st !== 'ignored') return false;
+    if (f.status === 'cash' && !(t.xfer || t.cash)) return false;
     if (f.cat === '__none') { if (st !== 'pending') return false; }
     else if (f.cat && !(t.splits || []).some(s => s.catId === f.cat)) return false;
     return matchesQ(t, f.q.trim());
@@ -783,10 +844,11 @@ function filteredTxns() {
 }
 function txRow(t) {
   const st = txnStatus(t), inc = t.kind === 'income'; let cat;
-  if (st === 'ignored') cat = `<span class="tag" style="margin:0">Ignored</span> <button class="link" data-act="restore-txn" data-id="${t.id}">Restore</button>`;
+  if (t.xfer && st !== 'ignored') cat = `<span class="tag ok" style="margin:0">💵 Cash withdrawal · ${fmtCur(crcOf(t), 'CRC')}</span> <button class="link" data-act="edit-txn" data-id="${t.id}">Edit</button>`;
+  else if (st === 'ignored') cat = `<span class="tag" style="margin:0">Ignored</span> <button class="link" data-act="restore-txn" data-id="${t.id}">Restore</button>`;
   else if (inc) cat = t.counted ? '<span class="tag ok" style="margin:0">Counted as income</span>' : `<button class="btn sm" data-act="count-income" data-id="${t.id}">Add to income</button> <button class="link" data-act="ignore-txn" data-id="${t.id}">Ignore</button>`;
   else if ((t.splits || []).length > 1) cat = `<button class="chip" data-act="edit-txn" data-id="${t.id}" title="${esc(catNames(t))}">Split · ${t.splits.length} categories</button>`;
-  else cat = `<select class="mini" data-assign="${t.id}">${catOptionsHtml(t.splits?.[0]?.catId, 'Unassigned')}</select>${t.auto ? ' <span class="tag" title="Assigned by a rule">auto</span>' : ''}${st === 'pending' ? ' <button class="link" data-act="ignore-txn" data-id="' + t.id + '">Ignore</button>' : ''}`;
+  else cat = `<select class="mini" data-assign="${t.id}">${catOptionsHtml(t.splits?.[0]?.catId, 'Unassigned')}</select>${t.auto ? ' <span class="tag" title="Assigned by a rule">auto</span>' : ''}${t.cash ? ' <span class="tag" title="Paid in cash">💵 cash</span>' : ''}${st === 'pending' ? ' <button class="link" data-act="ignore-txn" data-id="' + t.id + '">Ignore</button> <button class="link" data-act="mark-cash" data-id="' + t.id + '" title="This was an ATM cash withdrawal">ATM cash</button>' : ''}`;
   return `<div class="tx-row ${UI.sel.has(t.id) ? 'sel' : ''}" data-row="${t.id}"><input type="checkbox" class="row-chk" data-id="${t.id}" ${UI.sel.has(t.id) ? 'checked' : ''} aria-label="Select"><span class="date">${fmtDate(t.date)}</span><span class="desc" title="${esc(t.desc)}">${esc(t.desc) || '(no description)'}</span><span class="cat-cell">${cat}</span><span class="amt ${inc ? 'pos' : 'neg'}">${inc ? '+' : '-'}${fmt(t.amount)}${t.orig ? `<span class="orig">${fmtCur(t.orig.amount, t.orig.cur)}</span>` : ''}</span><span class="acts">${inc ? '' : `<button class="icon-btn" data-act="edit-txn" data-id="${t.id}" title="Split across categories" aria-label="Split">✂</button>`}<button class="icon-btn" data-act="edit-txn" data-id="${t.id}" title="Edit" aria-label="Edit">✎</button><button class="icon-btn" data-act="del-txn" data-id="${t.id}" title="Delete" aria-label="Delete">🗑</button></span></div>`;
 }
 let lastFilteredIds = [];
@@ -845,18 +907,19 @@ function setRank(id, n) {
   const [p] = S.projects.splice(a, 1); S.projects.splice(Math.max(0, Math.min(S.projects.length, n - 1)), 0, p); syncProjectCats(); commit(true);
 }
 function openProject(id) {
-  if (convGuard()) return;
   const p = id ? S.projects.find(x => x.id === id) : null;
   const m = modal({ title: p ? 'Edit project' : 'New project', body: `
     <label class="fld"><span>Project / purchase name</span><input class="txt" id="pjName" value="${esc(p?.name || '')}" maxlength="60" placeholder="e.g. New laptop"></label>
-    <div class="grid2"><label class="fld"><span>Target cost</span><input class="txt money" id="pjTarget" inputmode="decimal" value="${toInput(p?.target || 0)}" placeholder="0.00"></label>
-    <label class="fld"><span>Already saved</span><input class="txt money" id="pjSaved" inputmode="decimal" value="${toInput(p?.saved || 0)}" placeholder="0.00"></label></div>
+    <div class="grid2"><label class="fld"><span>Target cost (${viewCur()})</span><input class="txt money" id="pjTarget" inputmode="decimal" value="${inputVal(p?.target || 0)}" placeholder="0.00"></label>
+    <label class="fld"><span>Already saved (${viewCur()})</span><input class="txt money" id="pjSaved" inputmode="decimal" value="${inputVal(p?.saved || 0)}" placeholder="0.00"></label></div>
     <label class="fld"><span>Target month (optional)</span><input type="month" id="pjDate" value="${p?.date || ''}" placeholder="YYYY-MM" pattern="\\d{4}-\\d{2}"></label>
     <p class="hint">With a target month, ZeroBudget suggests a monthly contribution and can sync it into your budget automatically.</p><div class="err" id="pjErr"></div>`,
     footer: `<button class="btn" data-close>Cancel</button><button class="btn primary" id="pjSave">${p ? 'Save' : 'Create project'}</button>` });
   $('#pjSave', m.el).onclick = () => {
-    const name = $('#pjName', m.el).value.trim(), target = parseMoney($('#pjTarget', m.el).value), saved = parseMoney($('#pjSaved', m.el).value), date = $('#pjDate', m.el).value.trim();
+    const fb = (sel, orig) => { const el = $(sel, m.el); if (p && el.value === el.defaultValue) return orig; return readMoney(el.value, viewCur()).base; };
+    const name = $('#pjName', m.el).value.trim(), target = fb('#pjTarget', p?.target), saved = fb('#pjSaved', p?.saved), date = $('#pjDate', m.el).value.trim();
     const err = msg => { $('#pjErr', m.el).textContent = msg; };
+    if (target === null || saved === null) return err('Set the exchange rate first (tap the rate at the top) to type amounts in ' + viewCur() + '.');
     if (!name) return err('Please enter a name.'); if (!target) return err('Please enter a target cost greater than zero.');
     if (date && !/^\d{4}-\d{2}$/.test(date)) return err('Target month must look like 2027-06.');
     if (p) Object.assign(p, { name, target, saved, date }); else S.projects.push({ id: uid(), name, target, saved, date });
@@ -865,66 +928,110 @@ function openProject(id) {
 }
 
 /* ───────────────────────── Transaction modal (edit / split) ───────────────────────── */
-function openTxn(id) {
-  if (convGuard()) return;
-  const t = id ? txn(id) : null;
+function openTxn(id, preset) {
+  const t = id ? txn(id) : null; preset = preset || {};
+  const base = S.settings.base;
   const defDate = UI.month === curYM() ? today() : UI.month + '-01';
   const d = t ? { ...t } : { date: defDate, desc: '', amount: 0, kind: 'expense', counted: false };
-  let sp = (t?.splits || []).map(s => ({ cat: s.catId, amt: toInput(s.amount) }));
-  if (!sp.length) sp = [{ cat: '', amt: toInput(d.amount) }];
-  const m = modal({ title: t ? 'Edit / split transaction' : 'Add transaction', wide: true, body: `
+  const cur0 = t ? (t.orig && t.orig.cur !== base ? t.orig.cur : base) : (preset.cur || viewCur());
+  const tot0 = t ? (cur0 === base ? t.amount : t.orig.amount) : 0;
+  let sp = (t?.splits || []).map(s => ({ cat: s.catId, amt: toInput(cur0 === base || !t.amount ? s.amount : Math.round(s.amount * tot0 / t.amount)) }));
+  if (cur0 !== base && t && sp.length) { const o = sp.slice(0, -1).reduce((a, r) => a + parseTyped(r.amt), 0); sp[sp.length - 1].amt = toInput(tot0 - o); }
+  if (!sp.length) sp = [{ cat: '', amt: toInput(tot0) }];
+  const m = modal({ title: t ? 'Edit / split transaction' : (preset.cash ? 'Add cash payment' : 'Add transaction'), wide: true, body: `
     <div class="grid2"><label class="fld"><span>Date</span><input type="date" id="tDate" value="${d.date}"></label>
     <label class="fld"><span>Type</span><select id="tKind" style="width:100%">${opts([['expense', 'Expense (money out)'], ['income', 'Income / deposit (money in)']], d.kind)}</select></label>
-    <label class="fld span2"><span>Description / merchant</span><input class="txt" id="tDesc" value="${esc(d.desc)}" maxlength="200" placeholder="e.g. Walmart Supercenter"></label>
-    <label class="fld"><span>Total amount</span><input class="txt money" id="tAmt" inputmode="decimal" value="${toInput(d.amount)}" placeholder="0.00"></label></div>
+    <label class="fld span2"><span>Description / merchant</span><input class="txt" id="tDesc" value="${esc(d.desc)}" maxlength="200" placeholder="e.g. Electric bill (ICE)"></label>
+    <label class="fld"><span>Total amount — in</span><span class="cur-amt"><select id="tCur">${opts([['CRC', '₡ Colones'], ['USD', '$ Dollars']], cur0)}</select><input class="txt money" id="tAmt" inputmode="decimal" value="${toInput(tot0)}" placeholder="0"></span><span class="hint" id="tConv"></span></label></div>
+    <div id="cashRow"><label class="chk"><input type="checkbox" id="tCash" ${(d.cash || preset.cash) ? 'checked' : ''}> 💵 Paid in cash from my wallet (comes out of your cash balance)</label></div>
     <div id="incBox"><label class="chk"><input type="checkbox" id="tCount" ${d.counted ? 'checked' : ''}> Count this deposit toward income for its month</label></div>
     <div id="splitBox"><div class="split-h"><h4>Category assignment</h4><span id="spInfo" class="split-info"></span></div><div id="spRows"></div>
     <div class="row-gap"><button class="btn sm" id="spAdd">+ Add split</button><button class="btn sm ghost" id="spFill">Fill remainder</button><button class="btn sm ghost" id="spClear">Clear assignment</button></div>
-    <p class="hint">Splitting example: a ${fmt(20000)} receipt → ${fmt(19000)} Groceries + ${fmt(1000)} Hardware / Home. Split amounts must add up to the total.</p></div>
+    <p class="hint">Splitting example: a ₡20,000 receipt → ₡19,000 Groceries + ₡1,000 Hardware / Home. Split amounts must add up to the total. Tip: “20.000” is read as twenty thousand.</p></div>
     <div class="err" id="tErr"></div>`,
     footer: `${t ? '<button class="btn danger" id="tDel" style="margin-right:auto">Delete</button>' : ''}<button class="btn" data-close>Cancel</button><button class="btn primary" id="tSave">Save</button>` });
-  const q = s => $(s, m.el), total = () => parseMoney(q('#tAmt').value);
+  const q = s => $(s, m.el), total = () => parseTyped(q('#tAmt').value), cur = () => q('#tCur').value;
+  const sp0 = JSON.stringify(sp.map(r => [r.cat, parseTyped(r.amt)]));
   const info = () => {
-    const sum = sp.reduce((a, r) => a + parseMoney(r.amt), 0), diff = total() - sum, el = q('#spInfo');
+    const sum = sp.reduce((a, r) => a + parseTyped(r.amt), 0), diff = total() - sum, el = q('#spInfo'), f = x => fmtCur(x, cur());
     el.className = 'split-info ' + (diff === 0 ? 'ok' : diff > 0 ? 'warn' : 'over');
-    el.textContent = diff === 0 ? '✓ Fully allocated' : diff > 0 ? fmt(diff) + ' left to allocate' : fmt(-diff) + ' over the total';
+    el.textContent = diff === 0 ? '✓ Fully allocated' : diff > 0 ? f(diff) + ' left to allocate' : f(-diff) + ' over the total';
+    const c = cur(), a = total(), cv = q('#tConv');
+    if (c === base || !a) cv.textContent = ''; else { const b = toBaseC(a, c); cv.textContent = b === null ? 'Set the exchange rate (tap the rate at the top) to convert.' : '≈ ' + fmtBase(b) + ' in your ' + base + ' budget'; }
   };
-  const drawRows = () => { q('#spRows').innerHTML = sp.map((r, i) => `<div class="sp-row" data-i="${i}"><select class="sp-cat">${catOptionsHtml(r.cat, 'Choose category…')}</select><input class="txt money sp-amt" inputmode="decimal" value="${esc(r.amt)}" placeholder="0.00"><button class="icon-btn" data-spdel="${i}" aria-label="Remove split">✕</button></div>`).join(''); info(); };
-  const kindUI = () => { const inc = q('#tKind').value === 'income'; q('#splitBox').style.display = inc ? 'none' : ''; q('#incBox').style.display = inc ? '' : 'none'; };
+  const drawRows = () => { q('#spRows').innerHTML = sp.map((r, i) => `<div class="sp-row" data-i="${i}"><select class="sp-cat">${catOptionsHtml(r.cat, 'Choose category…')}</select><input class="txt money sp-amt" inputmode="decimal" value="${esc(r.amt)}" placeholder="0"><button class="icon-btn" data-spdel="${i}" aria-label="Remove split">✕</button></div>`).join(''); info(); };
+  const kindUI = () => { const inc = q('#tKind').value === 'income'; q('#splitBox').style.display = inc ? 'none' : ''; q('#cashRow').style.display = inc ? 'none' : ''; q('#incBox').style.display = inc ? '' : 'none'; };
   drawRows(); kindUI();
-  q('#tKind').onchange = kindUI;
+  q('#tKind').onchange = kindUI; q('#tCur').onchange = info;
+  q('#tCash').onchange = () => { if (!t && q('#tCash').checked && !total() && !preset.cur) { q('#tCur').value = 'CRC'; info(); } };
   q('#tAmt').addEventListener('input', () => { if (sp.length === 1) { sp[0].amt = q('#tAmt').value; const i = $('.sp-amt', m.el); if (i) i.value = sp[0].amt; } info(); });
   m.b.addEventListener('input', e => { if (e.target.classList.contains('sp-amt')) { sp[+e.target.closest('.sp-row').dataset.i].amt = e.target.value; info(); } });
-  m.b.addEventListener('change', e => { if (e.target.classList.contains('sp-cat')) sp[+e.target.closest('.sp-row').dataset.i].cat = e.target.value; });
+  m.b.addEventListener('change', e => { if (e.target.classList.contains('sp-cat')) { sp[+e.target.closest('.sp-row').dataset.i].cat = e.target.value; if (!t && catById(e.target.value)?.cash) q('#tCash').checked = true; } });
   m.b.addEventListener('click', e => { const b = e.target.closest('[data-spdel]'); if (b) { sp.splice(+b.dataset.spdel, 1); if (!sp.length) sp.push({ cat: '', amt: '' }); drawRows(); } });
-  q('#spAdd').onclick = () => { const rem = total() - sp.reduce((a, r) => a + parseMoney(r.amt), 0); sp.push({ cat: '', amt: rem > 0 ? toInput(rem) : '' }); drawRows(); };
-  q('#spFill').onclick = () => { const last = sp[sp.length - 1], others = sp.slice(0, -1).reduce((a, r) => a + parseMoney(r.amt), 0); last.amt = toInput(Math.max(0, total() - others)); drawRows(); };
+  q('#spAdd').onclick = () => { const rem = total() - sp.reduce((a, r) => a + parseTyped(r.amt), 0); sp.push({ cat: '', amt: rem > 0 ? toInput(rem) : '' }); drawRows(); };
+  q('#spFill').onclick = () => { const last = sp[sp.length - 1], others = sp.slice(0, -1).reduce((a, r) => a + parseTyped(r.amt), 0); last.amt = toInput(Math.max(0, total() - others)); drawRows(); };
   q('#spClear').onclick = () => { sp = [{ cat: '', amt: q('#tAmt').value }]; drawRows(); };
   if (t) q('#tDel').onclick = async () => { if (await confirmBox('Delete this transaction?', 'Delete', true)) { removeIncomeForTxn(t.id); S.txns = S.txns.filter(x => x.id !== t.id); UI.sel.delete(t.id); m.close(); commit(true); toast('Transaction deleted'); } };
   q('#tSave').onclick = () => {
     const err = s => { q('#tErr').textContent = s; };
-    const date = q('#tDate').value, desc = q('#tDesc').value.trim(), amount = total(), kind = q('#tKind').value;
+    const date = q('#tDate').value, desc = q('#tDesc').value.trim(), totalC = total(), kind = q('#tKind').value, c = cur();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return err('Please choose a valid date.');
-    if (!amount) return err('Please enter an amount greater than zero.');
+    if (!totalC) return err('Please enter an amount greater than zero.');
+    const amountB = (t && c === cur0 && totalC === tot0) ? t.amount : toBaseC(totalC, c);
+    if (amountB === null) return err('To save an amount in ' + c + ' your budget needs an exchange rate. Tap the rate at the top to set one.');
+    if (!amountB) return err('That amount is too small to convert.');
     let splits = [];
     if (kind === 'expense') {
-      const rows = sp.filter(r => r.cat || parseMoney(r.amt) > 0);
+      const rows = sp.filter(r => r.cat || parseTyped(r.amt) > 0);
       if (rows.length) {
         if (rows.some(r => !r.cat)) return err('Choose a category for every split row (or remove the empty row).');
-        if (rows.some(r => !parseMoney(r.amt))) return err('Every split needs an amount greater than zero.');
-        const sum = rows.reduce((a, r) => a + parseMoney(r.amt), 0);
-        if (sum !== amount) return err(`Splits add up to ${fmt(sum)} but the total is ${fmt(amount)}. Use “Fill remainder” to fix it.`);
-        const merged = new Map(); rows.forEach(r => merged.set(r.cat, (merged.get(r.cat) || 0) + parseMoney(r.amt)));
-        splits = [...merged].map(([catId, a]) => ({ catId, amount: a }));
+        if (rows.some(r => !parseTyped(r.amt))) return err('Every split needs an amount greater than zero.');
+        const sum = rows.reduce((a, r) => a + parseTyped(r.amt), 0);
+        if (sum !== totalC) return err(`Splits add up to ${fmtCur(sum, c)} but the total is ${fmtCur(totalC, c)}. Use “Fill remainder” to fix it.`);
+        const merged = new Map(); rows.forEach(r => merged.set(r.cat, (merged.get(r.cat) || 0) + parseTyped(r.amt)));
+        const ent = [...merged]; let used = 0;
+        splits = ent.map(([catId, a], i) => { const b = i === ent.length - 1 ? amountB - used : toBaseC(a, c); used += b; return { catId, amount: b }; });
+        if (splits.some(s => s.amount <= 0)) return err('One of the split amounts is too small to convert.');
       }
     }
     const count = kind === 'income' && q('#tCount').checked;
-    let rec = t; const prevInc = t ? null : null;
+    let rec = t;
     if (!rec) { rec = { id: uid() }; S.txns.push(rec); }
-    removeIncomeForTxn(rec.id); if (rec.orig && amount !== rec.amount) delete rec.orig;
-    Object.assign(rec, { date, desc, amount, kind, splits, auto: false, counted: count, ignored: rec.ignored && !splits.length && !count ? rec.ignored : false });
-    if (count) { const ym = ymOf(date), pt = totalIncome(ym); getMonth(ym).income.push({ id: uid(), name: desc || 'Deposit', amount, txnId: rec.id }); afterIncomeChange(pt, ym); }
-    m.close(); commit(true); toast(t ? 'Transaction saved' : 'Transaction added', 'ok');
+    removeIncomeForTxn(rec.id);
+    Object.assign(rec, { date, desc, amount: amountB, kind, splits, auto: false, counted: count, ignored: rec.ignored && !splits.length && !count ? rec.ignored : false });
+    if (c !== base) rec.orig = { cur: c, amount: totalC }; else delete rec.orig;
+    if (kind === 'expense' && q('#tCash').checked) rec.cash = true; else delete rec.cash;
+    delete rec.xfer; delete rec.cashIn; delete rec.man;
+    if (count) { const ym = ymOf(date), pt = totalIncome(ym); getMonth(ym).income.push({ id: uid(), name: desc || 'Deposit', amount: amountB, txnId: rec.id }); afterIncomeChange(pt, ym); }
+    m.close(); commit(true); toast(t ? 'Transaction saved' : (rec.cash ? 'Cash payment added' : 'Transaction added'), 'ok');
+  };
+}
+
+/* ───────────────────────── cash withdrawal (ATM) ───────────────────────── */
+function openWithdrawal(id) {
+  const t = id ? txn(id) : null, base = S.settings.base, bank = !!t && !t.man;
+  const d = t || { date: today(), desc: 'Cash withdrawal', amount: 0 };
+  const pre = t ? crcOf(t) : 0;
+  const m = modal({ title: t && t.xfer ? 'Edit cash withdrawal' : t ? 'Mark as ATM cash withdrawal' : 'Add cash to wallet', body: `
+    <div class="grid2"><label class="fld"><span>Date</span><input type="date" id="wDate" value="${d.date}" ${bank ? 'disabled' : ''}></label>
+    <label class="fld"><span>Description</span><input class="txt" id="wDesc" value="${esc(d.desc)}" maxlength="200" ${bank ? 'disabled' : ''}></label></div>
+    <label class="fld"><span>Colones you actually received (₡)</span><input class="txt money" id="wCrc" inputmode="decimal" value="${toInput(pre)}" placeholder="e.g. 100000"></label>
+    ${bank ? `<p class="hint">Your bank charged <b>${fmtBase(t.amount)}</b>${t.orig ? ` (${fmtCur(t.orig.amount, t.orig.cur)})` : ''}. Enter the colones the ATM gave you — the rate and fees differ from the daily rate. This is moved to your wallet, <b>not</b> counted as spending.</p>` : '<p class="hint">Use this for cash that isn’t on a bank statement (change, cash gifts, cash income you keep in your wallet).</p>'}
+    <div class="err" id="wErr"></div>`,
+    footer: `${t && t.man ? '<button class="btn danger" id="wDel" style="margin-right:auto">Delete</button>' : ''}${t && t.xfer && !t.man ? '<button class="btn" id="wUn" style="margin-right:auto">Not a withdrawal</button>' : ''}<button class="btn" data-close>Cancel</button><button class="btn primary" id="wSave">Save</button>` });
+  const q = s => $(s, m.el);
+  if (t && t.man) q('#wDel').onclick = async () => { if (await confirmBox('Delete this cash entry?', 'Delete', true)) { S.txns = S.txns.filter(x => x.id !== t.id); m.close(); commit(true); } };
+  if (t && t.xfer && !t.man) q('#wUn').onclick = () => { delete t.xfer; delete t.cashIn; m.close(); commit(true); toast('Back to Unassigned'); };
+  q('#wSave').onclick = () => {
+    const err = s => { q('#wErr').textContent = s; };
+    const crc = parseTyped(q('#wCrc').value); if (!crc) return err('Enter the colones you received.');
+    if (t) { Object.assign(t, { xfer: 'cash', cashIn: { amount: crc }, splits: [], ignored: false, auto: false }); delete t.cash; if (!bank) { t.desc = q('#wDesc').value.trim() || 'Cash'; if (/^\d{4}-\d{2}-\d{2}$/.test(q('#wDate').value)) t.date = q('#wDate').value; } }
+    else {
+      const date = q('#wDate').value; if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return err('Please choose a valid date.');
+      const amount = toBaseC(crc, 'CRC'); if (amount === null) return err('Your budget is in ' + base + ' — set the exchange rate first (tap the rate at the top).'); if (!amount) return err('That amount is too small.');
+      S.txns.push({ id: uid(), date, desc: q('#wDesc').value.trim() || 'Cash', amount, kind: 'expense', splits: [], ignored: false, counted: false, xfer: 'cash', cashIn: { amount: crc }, man: true, ...(base !== 'CRC' ? { orig: { cur: 'CRC', amount: crc } } : {}) });
+    }
+    m.close(); commit(true); toast('Added ' + fmtCur(crc, 'CRC') + ' to your cash wallet', 'ok');
   };
 }
 
@@ -935,13 +1042,14 @@ function openCat(groupId, catId) {
   const m = modal({ title: c ? 'Edit category' : 'Add category', body: `
     <label class="fld"><span>Category name</span><input class="txt" id="cName" value="${esc(c?.name || '')}" maxlength="60" placeholder="e.g. Groceries"></label>
     <label class="fld"><span>Group</span><select id="cGroup" style="width:100%">${S.groups.filter(g => !g.locked).map(g => `<option value="${g.id}"${g.id === (index().cats.get(catId)?.g.id || groupId) ? ' selected' : ''}>${esc(g.name)}</option>`).join('')}</select></label>
-    <label class="chk"><input type="checkbox" id="cFund" ${c?.fund ? 'checked' : ''}> Sinking fund — unspent money rolls over month to month</label><div class="err" id="cErr"></div>`,
+    <label class="chk"><input type="checkbox" id="cFund" ${c?.fund ? 'checked' : ''}> Sinking fund — unspent money rolls over month to month</label>
+    <label class="chk"><input type="checkbox" id="cCash" ${c?.cash ? 'checked' : ''}> 💵 Usually paid in cash (new payments default to “paid from my wallet”)</label><div class="err" id="cErr"></div>`,
     footer: `<button class="btn" data-close>Cancel</button><button class="btn primary" id="cSave">Save</button>` });
   const go = () => {
     const name = $('#cName', m.el).value.trim(); if (!name) { $('#cErr', m.el).textContent = 'Please enter a name.'; return; }
-    const gid = $('#cGroup', m.el).value, fund = $('#cFund', m.el).checked, g = S.groups.find(x => x.id === gid);
-    if (c) { const old = index().cats.get(c.id).g; c.name = name; c.fund = fund; if (old.id !== gid) { old.cats = old.cats.filter(x => x.id !== c.id); g.cats.push(c); } }
-    else g.cats.push({ id: uid(), name, fund });
+    const gid = $('#cGroup', m.el).value, fund = $('#cFund', m.el).checked, cash = $('#cCash', m.el).checked, g = S.groups.find(x => x.id === gid);
+    if (c) { const old = index().cats.get(c.id).g; c.name = name; c.fund = fund; if (cash) c.cash = true; else delete c.cash; if (old.id !== gid) { old.cats = old.cats.filter(x => x.id !== c.id); g.cats.push(c); } }
+    else g.cats.push({ id: uid(), name, fund, ...(cash ? { cash: true } : {}) });
     m.close(); commit(true);
   };
   $('#cSave', m.el).onclick = go; $('#cName', m.el).addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
@@ -964,7 +1072,8 @@ function openCatDetails(catId) {
 function assign(id, catId) {
   const t = txn(id); if (!t) return;
   if (t.kind === 'income') return toast('Deposits can’t go into a spending category — add them as income instead.', 'warn');
-  if (!catId) t.splits = []; else { t.splits = [{ catId, amount: t.amount }]; t.ignored = false; }
+  if (t.xfer) return toast('That’s a cash withdrawal — it isn’t spending. Record the payments you make with the cash instead.', 'warn');
+  if (!catId) t.splits = []; else { t.splits = [{ catId, amount: t.amount }]; t.ignored = false; if (catById(catId)?.cash) t.cash = true; }
   t.auto = false; commit(false); if (catId) offerRule(t, catId);
 }
 function countIncome(id) {
@@ -1568,6 +1677,7 @@ function applyRules(t) {
     if (!ruleMatches(r, t)) continue;
     if (r.target === '__ignore') { Object.assign(t, { ignored: true, splits: [], counted: false, auto: true }); return true; }
     if (t.kind === 'income') { if (r.target === '__income') { countIncomeQuiet(t); t.auto = true; return true; } continue; }
+    if (r.target === '__cash') { t.xfer = 'cash'; t.splits = []; t.auto = true; return true; }
     if (catById(r.target)) { t.splits = [{ catId: r.target, amount: t.amount }]; t.auto = true; return true; }
   }
   return false;
@@ -1582,8 +1692,8 @@ function offerRule(t, catId) {
   if (S.rules.some(r => r.target === catId && ruleMatches(r, t))) return;
   toast(`${fmt(t.amount)} → ${catById(catId)?.name}`, 'ok', { label: 'Always do this', fn: () => openRuleDialog({ text: key, target: catId }) });
 }
-const targetLabel = t => t === '__ignore' ? 'Ignore it' : t === '__income' ? 'Count as income' : (catById(t)?.name || '(deleted category)');
-const targetOptions = sel => `<option value="">Choose…</option><optgroup label="Special"><option value="__ignore"${sel === '__ignore' ? ' selected' : ''}>Ignore (transfers, duplicates…)</option><option value="__income"${sel === '__income' ? ' selected' : ''}>Count as income (deposits)</option></optgroup>` + catOptionsHtml(sel, '').replace(/^<option value="">[^<]*<\/option>/, '');
+const targetLabel = t => t === '__ignore' ? 'Ignore it' : t === '__income' ? 'Count as income' : t === '__cash' ? 'Cash withdrawal (ATM)' : (catById(t)?.name || '(deleted category)');
+const targetOptions = sel => `<option value="">Choose…</option><optgroup label="Special"><option value="__ignore"${sel === '__ignore' ? ' selected' : ''}>Ignore (transfers, duplicates…)</option><option value="__income"${sel === '__income' ? ' selected' : ''}>Count as income (deposits)</option><option value="__cash"${sel === '__cash' ? ' selected' : ''}>Cash withdrawal (ATM → wallet)</option></optgroup>` + catOptionsHtml(sel, '').replace(/^<option value="">[^<]*<\/option>/, '');
 function openRuleDialog(r0, after) {
   const r = { mode: 'contains', text: '', target: '', ...r0 };
   const m = modal({ title: r.id ? 'Edit rule' : 'New rule', body: `
@@ -1644,8 +1754,8 @@ function mergeStates(L, R) {
     if (!lg) { lg = { id: rg.id, name: rg.name, cats: [], collapsed: !!rg.collapsed, locked: !!rg.locked }; A.groups.push(lg); } else if (rNewer && !lg.locked) lg.name = rg.name;
     for (const rc of rg.cats) {
       let lc = allCats().find(c => c.id === rc.id) || (rc.projectId && allCats().find(c => c.projectId === rc.projectId)) || lg.cats.find(c => !c.projectId && !rc.projectId && fold(c.name) === fold(rc.name));
-      if (!lc) { lc = { id: rc.id, name: rc.name, fund: !!rc.fund, ...(rc.projectId ? { projectId: rc.projectId } : {}) }; lg.cats.push(lc); if (!rc.projectId) st.cats++; }
-      else if (rNewer && !lc.projectId) { lc.name = rc.name; lc.fund = !!rc.fund; }
+      if (!lc) { lc = { id: rc.id, name: rc.name, fund: !!rc.fund, ...(rc.cash ? { cash: true } : {}), ...(rc.projectId ? { projectId: rc.projectId } : {}) }; lg.cats.push(lc); if (!rc.projectId) st.cats++; }
+      else if (rNewer && !lc.projectId) { lc.name = rc.name; lc.fund = !!rc.fund; if (rc.cash) lc.cash = true; else delete lc.cash; }
       idMap.set(rc.id, lc.id);
     }
   }
@@ -1662,7 +1772,7 @@ function mergeStates(L, R) {
     let lt = byId.get(rt.id); if (!lt) { const pool = free.get(key(rt)); if (pool && pool.length) lt = pool.pop(); }
     if (lt) {
       tIdMap.set(rt.id, lt.id);
-      if (rNewer) { const sp = remap(rt.splits), nw = { ignored: !!rt.ignored, auto: !!rt.auto, splits: sp.reduce((a, s) => a + s.amount, 0) === lt.amount ? sp : [] }; if (JSON.stringify([lt.ignored, !!lt.auto, lt.splits]) !== JSON.stringify([nw.ignored, nw.auto, nw.splits])) { Object.assign(lt, nw); st.updated++; } }
+      if (rNewer) { const sp = remap(rt.splits), nw = { ignored: !!rt.ignored, auto: !!rt.auto, splits: sp.reduce((a, s) => a + s.amount, 0) === lt.amount ? sp : [], cash: !!rt.cash, xfer: rt.xfer || '', cashIn: rt.cashIn || null }; const sig = x => JSON.stringify([!!x.ignored, !!x.auto, x.splits, !!x.cash, x.xfer || '', x.cashIn || null]); if (sig(lt) !== sig(nw)) { Object.assign(lt, nw); if (!lt.cash) delete lt.cash; if (!lt.xfer) { delete lt.xfer; delete lt.cashIn; } st.updated++; } }
     } else {
       const sp = remap(rt.splits); A.txns.push({ ...rt, splits: sp.reduce((a, s) => a + s.amount, 0) === rt.amount ? sp : [], counted: false }); tIdMap.set(rt.id, rt.id); st.txns++;
     }
@@ -1684,6 +1794,7 @@ function mergeStates(L, R) {
   // settings: keep local, but adopt a fresher exchange rate
   if (R.settings.rate > 0 && (!(A.settings.rate > 0) || (R.settings.rateDate || '') > (A.settings.rateDate || ''))) Object.assign(A.settings, { rate: R.settings.rate, rateDate: R.settings.rateDate, rateSrc: R.settings.rateSrc, rateName: R.settings.rateName });
   A.settings.csvMaps = { ...R.settings.csvMaps, ...A.settings.csvMaps };
+  if (rNewer && R.settings.cashStart !== undefined) A.settings.cashStart = R.settings.cashStart;
   A.modAt = Math.max(L.modAt || 0, R.modAt || 0);
   return { state: A, stats: st, rNewer };
 }
@@ -1910,10 +2021,15 @@ const ACT = {
     if (await confirmBox(`Delete “${c.name}”?${n ? ` ${n} assigned transaction(s) will go back to Unassigned.` : ''}`, 'Delete', true)) { removeCategory(c.id); commit(true); }
   },
   'cat-details': el => openCatDetails(el.dataset.id),
-  'add-income': () => { if (convGuard()) return; const m = getMonth(UI.month), id = uid(); m.income.push({ id, name: '', amount: 0 }); commit(true); setTimeout(() => $(`[data-inc-name="${id}"]`)?.focus(), 0); },
+  'add-income': () => { const m = getMonth(UI.month), id = uid(); m.income.push({ id, name: '', amount: 0 }); commit(true); setTimeout(() => $(`[data-inc-name="${id}"]`)?.focus(), 0); },
   'del-income': el => { const m = getMonth(UI.month), i = m.income.find(x => x.id === el.dataset.id); if (i?.txnId) { const t = txn(i.txnId); if (t) t.counted = false; } m.income = m.income.filter(x => x.id !== el.dataset.id); commit(true); },
   'add-txn': () => openTxn(),
-  'edit-txn': el => openTxn(el.dataset.id),
+  'edit-txn': el => { const t = txn(el.dataset.id); if (t && t.xfer) openWithdrawal(t.id); else openTxn(el.dataset.id); },
+  'add-cash': () => openTxn(null, { cash: true, cur: 'CRC' }),
+  'add-withdrawal': () => openWithdrawal(),
+  'mark-cash': el => openWithdrawal(el.dataset.id),
+  'wallet-list': () => { UI.tx.status = 'cash'; UI.tx.scope = 'all'; UI.tab = 'tx'; render(); },
+  'wallet-start': async () => { const v = await askText({ title: 'Starting cash', label: 'Colones in your wallet right now (before the payments you record here)', value: toInput(S.settings.cashStart || 0), placeholder: 'e.g. 25000', ok: 'Save' }); if (v == null || v === '') return; S.settings.cashStart = parseTyped(v); commit(false); toast('Starting cash saved', 'ok'); },
   'del-txn': async el => { if (await confirmBox('Delete this transaction?', 'Delete', true)) { removeIncomeForTxn(el.dataset.id); S.txns = S.txns.filter(t => t.id !== el.dataset.id); commit(true); } },
   'ignore-txn': el => { const t = txn(el.dataset.id); if (!t) return; const had = t.counted; removeIncomeForTxn(t.id); Object.assign(t, { ignored: true, splits: [], counted: false }); commit(had); toast('Ignored — it won’t affect your budget (handy for transfers)'); },
   'restore-txn': el => { const t = txn(el.dataset.id); if (t) { t.ignored = false; commit(false); } },
@@ -1924,7 +2040,7 @@ const ACT = {
   'bulk-clear': () => { UI.sel.clear(); renderTxList(); },
   'bulk-assign': () => {
     const cat = $('#bulkCat').value; if (!cat) return toast('Choose a category first.', 'warn'); let n = 0, sk = 0;
-    for (const id of UI.sel) { const t = txn(id); if (t && t.kind === 'expense') { t.splits = [{ catId: cat, amount: t.amount }]; t.ignored = false; n++; } else sk++; }
+    for (const id of UI.sel) { const t = txn(id); if (t && t.kind === 'expense' && !t.xfer) { t.splits = [{ catId: cat, amount: t.amount }]; t.ignored = false; if (catById(cat)?.cash) t.cash = true; n++; } else sk++; }
     UI.sel.clear(); commit(false); toast(`Assigned ${n} transaction${n === 1 ? '' : 's'} to ${catById(cat).name}${sk ? ` (${sk} deposit(s) skipped)` : ''}`, 'ok');
   },
   'bulk-ignore': () => { for (const id of UI.sel) { const t = txn(id); if (t) { removeIncomeForTxn(id); Object.assign(t, { ignored: true, splits: [], counted: false }); } } UI.sel.clear(); commit(true); },
@@ -1942,7 +2058,7 @@ document.addEventListener('click', e => { const el = e.target.closest('[data-act
 /* inputs */
 document.addEventListener('input', e => {
   const t = e.target;
-  if (t.classList.contains('planned')) { getMonth(UI.month).planned[t.dataset.cat] = parseMoney(t.value); rev++; save(); renderTabs(); renderSummary(); refreshNumbers(); }
+  if (t.classList.contains('planned')) { getMonth(UI.month).planned[t.dataset.cat] = baseIn(t.value, getMonth(UI.month).planned[t.dataset.cat] || 0); rev++; save(); renderTabs(); renderSummary(); refreshNumbers(); }
   else if (t.id === 'txQ') { UI.tx.q = t.value; UI.tx.limit = 200; renderTxList(); }
   else if (t.id === 'sideQ') { UI.side.q = t.value; renderSideList(); }
 });
@@ -1950,7 +2066,7 @@ document.addEventListener('change', e => {
   const t = e.target, ds = t.dataset || {};
   if (ds.assign !== undefined) assign(ds.assign, t.value);
   else if (ds.incName !== undefined) { const i = getMonth(UI.month).income.find(x => x.id === ds.incName); if (i) { i.name = t.value.trim(); rev++; save(); } }
-  else if (ds.incAmt !== undefined) { const ym = UI.month, i = getMonth(ym).income.find(x => x.id === ds.incAmt); if (i) { const prev = totalIncome(ym); i.amount = parseMoney(t.value); afterIncomeChange(prev, ym); commit(true); } }
+  else if (ds.incAmt !== undefined) { const ym = UI.month, i = getMonth(ym).income.find(x => x.id === ds.incAmt); if (i) { const prev = totalIncome(ym); i.amount = baseIn(t.value, i.amount); afterIncomeChange(prev, ym); commit(true); } }
   else if (ds.rank !== undefined) setRank(ds.rank, +t.value);
   else if (t.classList.contains('row-chk')) { t.checked ? UI.sel.add(ds.id) : UI.sel.delete(ds.id); t.closest('.tx-row').classList.toggle('sel', t.checked); renderBulkBar(); const all = $('#chkAll'); if (all) all.checked = lastFilteredIds.slice(0, UI.tx.limit).every(id => UI.sel.has(id)); }
   else if (t.id === 'chkAll') { lastFilteredIds.slice(0, UI.tx.limit).forEach(id => t.checked ? UI.sel.add(id) : UI.sel.delete(id)); renderTxList(); }
@@ -2008,7 +2124,7 @@ setTimeout(() => runSync(), 900);
 setInterval(() => { if (document.visibilityState === 'visible') runSync(); }, 30000);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') runSync(); });
 window.addEventListener('online', () => runSync());
-window.__zb = { runSync, get SC() { return SC; }, get S() { return S; }, set S(v) { S = v; }, UI, ACT, render, parseCSV, parseAmount, PDFR, mergeStates, normalize, fetchRate, applyRules, convertAll, sampleState };
+window.__zb = { runSync, get SC() { return SC; }, get S() { return S; }, set S(v) { S = v; }, UI, ACT, render, parseCSV, parseAmount, PDFR, mergeStates, normalize, fetchRate, applyRules, convertAll, sampleState, commit };
 })();
 </script>
 </body>

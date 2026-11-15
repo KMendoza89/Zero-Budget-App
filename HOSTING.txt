@@ -1,0 +1,19 @@
+ZeroBudget — install on your laptop AND your phone
+==================================================
+These files are only the app (code). Your budget data never goes to any server:
+each device keeps its own data in its own browser. Hosting just gives the app a
+web address so a phone can install it and run it offline.
+
+1. Put this whole folder on any free static host (GitHub Pages, Netlify, Cloudflare Pages…).
+   Keep all 5 files together: index.html, manifest.webmanifest, sw.js, icon-192.png, icon-512.png.
+2. Open the address once on your laptop and once on your Samsung (Chrome).
+3. Install it: in Chrome use the menu -> "Install app" / "Add to Home screen".
+   After the first visit it also works with no internet.
+4. Keep the two devices in sync AUTOMATICALLY: Settings (gear) -> "Set up automatic sync".
+   The app walks you through a free Cloudflare Worker (the script is built into the app;
+   sync-worker.js in this folder is the same script). Data is encrypted with your passphrase
+   before upload. Use the same address, token and passphrase on both devices.
+   Prefer no accounts? Use "Share backup" + "Import / merge backup" instead.
+
+Tip: the app address is public if the host is public (anyone could open the empty app),
+but your data stays on your devices. Use "Download backup" regularly.
