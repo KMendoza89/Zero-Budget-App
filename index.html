@@ -664,6 +664,7 @@ const opts = (list, val) => list.map(([v, l]) => `<option value="${v}"${v === va
 
 /* ───────────────────────── rendering: shell ───────────────────────── */
 function commit(structural) { rev++; save(); structural ? render() : refresh(); }
+const APP_VERSION = 'v5 (Nov 15) · cash wallet';
 let rendering = false, again = false;
 function render() {
   if (rendering) { again = true; return; }
@@ -674,7 +675,7 @@ function renderNow() {
   renderTabs(); renderSummary(); renderMonthNav(); renderCurBar();
   const main = $('#main'); main.dataset.view = UI.tab;
   ({ budget: renderBudget, inbox: renderBudget, tx: renderTx, goals: renderGoals })[UI.tab](main);
-  $('#foot').textContent = 'All data is stored only in this browser (localStorage). Use Export Data regularly to keep a backup.' + (storageOK ? '' : ' ⚠ Storage is unavailable here — changes will be lost on reload!');
+  $('#foot').textContent = 'ZeroBudget ' + APP_VERSION + ' · All data is stored only in this browser (localStorage). Use Export Data regularly to keep a backup.' + (storageOK ? '' : ' ⚠ Storage is unavailable here — changes will be lost on reload!');
 }
 function refresh() {
   renderTabs(); renderSummary(); renderCurBar();
@@ -2170,7 +2171,7 @@ if (!S.txns.length && !S.projects.length && !Object.values(S.months).some(m => m
 // keep the exchange rate fresh (silent, optional, only the rate is requested)
 if (S.settings.autoRate && navigator.onLine !== false && S.settings.rateSrc !== 'manual' && S.settings.rateDate !== today()) setTimeout(() => fetchRate(false), 600);
 try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (e) { }
-if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(() => { });
+if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) { navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => { }); let had = !!navigator.serviceWorker.controller; navigator.serviceWorker.addEventListener('controllerchange', () => { if (had) { try { toast('App updated — reloading…'); } catch (e) { } setTimeout(() => location.reload(), 900); } had = true; }); }
 try { window.matchMedia('(max-width:980px)').addEventListener('change', ev => { if (!ev.matches && UI.tab === 'inbox') { UI.tab = 'budget'; render(); } }); } catch (e) { }
 // automatic sync: at start, when you come back to the app, when you reconnect, and every 30 s while it is open
 setTimeout(() => runSync(), 900);
